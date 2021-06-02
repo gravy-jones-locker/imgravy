@@ -162,12 +162,25 @@ class Image:
         
         return self
 
-    def draw_lines(self, lines):
+    def draw_lines(self, lines, fill_type=1, color=(0, 0, 255)):
         """
         Draw lines onto an image.
         """
         for pt1, pt2 in lines:
-            cv2.line(self.arr, pt1, pt2, (0,0,255), 1, cv2.LINE_AA)
+            cv2.line(self.arr, pt1, pt2, color, fill_type, cv2.LINE_AA)
+
+    def draw_polys(self, polys, fill_type=1, color=(0, 0, 255)):
+        """
+        Draw a (closed) polygon onto an image.
+        """
+        for pts in polys:
+            lines = []
+            for i, pt0 in enumerate(pts):
+                pt1 = pts[i+1] if i < len(pts) - 1 else pts[0]
+                lines.append((pt0[0], pt1[0]))
+            self.draw_lines(lines, color=color) 
+
+        return self
 
     def flood_fill(self, color):
         """
@@ -181,7 +194,7 @@ class Image:
     ####   'get_' methods return something other than the image itself   ####
 
     @Decorators.prep_8UC1
-    def get_contours(self):
+    def get_contours(self, as_mbrs=False):
         """
         Shorthand for the cv2 findContours method.
         """
@@ -189,7 +202,17 @@ class Image:
                                                     cv2.CHAIN_APPROX_SIMPLE)
         
         # Return in descending order of size (area)
-        return sorted(cnts, key=lambda x: cv2.contourArea(x))[::-1]
+        cnts = sorted(cnts, key=lambda x: cv2.contourArea(x))[::-1]
+
+        if as_mbrs:
+            for i, cnt in enumerate(cnts):
+                cnt = cnt.reshape(len(cnt), 2)
+                pt0 = min([x[0] for x in cnt]), min([x[1] for x in cnt])
+                pt1 = max([x[0] for x in cnt]), max([x[1] for x in cnt])
+
+                cnts[i] = (*pt0, pt1[0] - pt0[0], pt1[1] - pt0[1])
+
+        return cnts
 
     @Decorators.supply_new
     def get_copy(self):
@@ -220,11 +243,14 @@ class Image:
             return lines.reshape(len(lines), 2, 2)  # Removes additional dim
 
     @Decorators.supply_new
-    def get_template(self):
+    def get_template(self, color=0):
         """
         Return Image object with zero (black) array of same size.
         """
-        self.arr = np.zeros_like(self.arr).astype('uint8')
+        if color == 0:
+            self.arr = np.zeros_like(self.arr).astype('uint8')
+        else:
+            self.arr = np.full([self.h, self.w], color).astype('uint8')
         
         return self
 
@@ -274,6 +300,8 @@ class Image:
         """
         cv2.putText(self.arr, str(text), (2, 10), cv2.FONT_HERSHEY_SIMPLEX,
                                                     0.25, (0, 0, 255), 1)
+
+        return self
 
     @Decorators.reset_dimensions
     def resize(self, w=None, h=None):
@@ -325,14 +353,13 @@ class Image:
         return self
 
     @Decorators.prep_8UC1
-    def show(self, cnts=[], boxes=[], text='', lines=[]):
+    def show(self, cnts=[], boxes=[], text='', lines=[], polys=[]):
         """
         Normalize and show the image for debugging purposes.
         """
         # Operations will have no effect if no objects supplied
         self.cvt2color().draw_contours(cnts).draw_boxes(boxes).draw_lines(lines)
-        if text is not None:
-            self.put_text(text)
+        self.put_text(text).draw_polys(polys)
         
         self.resize(*DEBUG_SIZE_PX)
         cv2.imshow('progress', self.arr)
