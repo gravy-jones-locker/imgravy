@@ -4,6 +4,7 @@ import math
 import warnings
 import os
 from copy import copy
+from .utils import Utils
 
 warnings.filterwarnings('ignore')
 DEBUG_SIZE_PX = [500, 500]
@@ -47,8 +48,9 @@ class Image:
             Get a new height/width value after any relevant ops.
             """
             def inner(cls, *args, **kwargs):
-                out = func(cls, *args, **kwargs)   
-                out.h, out.w = out.arr.shape[:2] 
+                out = func(cls, *args, **kwargs)
+                im = out[0] if hasattr(out, '__len__') else out  
+                im.h, im.w = im.arr.shape[:2] 
                 return out
             return inner     
                 
@@ -184,12 +186,12 @@ class Image:
 
         return self
 
-    def flood_fill(self, color):
+    def flood_fill(self, c, color=255):
         """
         Fill contained spaces from the inside out.
         """
         mask = np.zeros((self.h + 2, self.w + 2), np.uint8)
-        cv2.floodFill(self.arr, mask, [int(x) for x in self.c], color)
+        cv2.floodFill(self.arr, mask, [int(x) for x in c], color)
 
         return self
 
@@ -284,13 +286,13 @@ class Image:
         """
         Add black padding to the image as specified.
         """
-        pad_hi = np.full([hi, self.w], color)
-        pad_lo = np.full([lo, self.w], color)
+        pad_hi = np.full([hi, self.w], color).astype(self.arr.dtype)
+        pad_lo = np.full([lo, self.w], color).astype(self.arr.dtype)
 
         self.arr = np.vstack([pad_hi, self.arr, pad_lo])
 
-        pad_l = np.full([self.h + hi + lo, l], color)
-        pad_r = np.full([self.h + hi + lo, r], color)
+        pad_l = np.full([self.h + hi + lo, l], color).astype(self.arr.dtype)
+        pad_r = np.full([self.h + hi + lo, r], color).astype(self.arr.dtype)
         
         self.arr = np.hstack([pad_l, self.arr, pad_r])
 
@@ -323,14 +325,32 @@ class Image:
 
         return self
 
-    def rotate(self, theta):
+    @Decorators.reset_dimensions
+    def rotate(self, theta, bound=True, bd=0):
         """
         Spin the image through the angle specified.
         """
         M = cv2.getRotationMatrix2D(self.c, theta, 1)
-        self.arr = cv2.warpAffine(self.arr, M, (self.w, self.h))
 
-        return self
+        if bound:
+            cos = np.abs(M[0, 0])
+            sin = np.abs(M[0, 1])
+            
+            w = int((self.h * sin) + (self.w * cos))
+            h = int((self.h * cos) + (self.w * sin))
+
+            off_x = int((w / 2) - self.c[0])
+            off_y = int((h / 2) - self.c[1])
+
+            M[0, 2] += off_x
+            M[1, 2] += off_y
+        else:
+            w, h = self.w, self.h
+            off_x, off_y = 0, 0
+
+        self.arr = cv2.warpAffine(self.arr, M, (w, h), borderValue=bd)
+
+        return self, (off_x, off_y)
 
     def sharpen_edges(self, hi_k, lo_k, thresh=True):
         """
@@ -369,7 +389,7 @@ class Image:
         self.cvt2color().draw_contours(cnts).draw_boxes(boxes).draw_lines(lines)
         self.put_text(text).draw_polys(polys)
         
-        self.resize(*DEBUG_SIZE_PX)
+        #self.resize(*DEBUG_SIZE_PX)
         cv2.imshow('progress', self.arr)
         if cv2.waitKey(0) == ord('q'):
             cv2.destroyAllWindows()
