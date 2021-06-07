@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import math
 import warnings
+import os
 from copy import copy
 
 warnings.filterwarnings('ignore')
@@ -57,13 +58,14 @@ class Image:
         """
         if isinstance(in_obj, str):  # If str assume path to saved .npy array
             self.arr = np.load(in_obj).astype('float64')
+            self.fname = os.path.split(in_obj)[1].split('.')[0]
         else:
             # Otherwise assume live array - copy for hygiene
             self.arr = in_obj.copy()
         
         self.h, self.w = self.arr.shape[:2]
 
-        if self.arr.shape != [self.h, self.w]:
+        if len(self.arr.shape) == 3 and self.arr.shape[2] == 1:
             self.arr = self.arr.reshape(self.h, self.w)  # Force into shape
 
     @Decorators.prep_8UC1
@@ -237,7 +239,7 @@ class Image:
         """
         lines = cv2.HoughLinesP(self.arr, 1, np.pi / 180, thresh, None,
                                                             min_len, max_gap)
-        if len(lines) == 0:
+        if lines is None:
             return []
         else:
             return lines.reshape(len(lines), 2, 2)  # Removes additional dim
@@ -293,6 +295,12 @@ class Image:
         self.arr = np.hstack([pad_l, self.arr, pad_r])
 
         return self
+
+    def print(self, fpath):
+        """
+        Save to the location specified.
+        """
+        cv2.imwrite(fpath, self.arr)
 
     def put_text(self, text):
         """
