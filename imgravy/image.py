@@ -2,187 +2,130 @@ from __future__ import annotations
 
 import numpy as np
 import cv2
-import warnings
-from copy import copy
 
 DEBUG_SIZE_PX = 900
 
 class Image:
-
     """
     Top-level class for managing image operations. By default operations are
     done in-place but return an updated instance for further manipulations.
     """
-
     class Decorators:
 
         @classmethod
-        def supply_new(decs, func):
-            """
-            Perform the specified op on a new (copy) Image object
-            """
-            def inner(cls, *args, **kwargs):
-                out = copy(cls)
-                out.arr = cls.arr.copy()
-                cls = func(out, *args, **kwargs)
-                return cls
+        def supply_new(decs: Decorators, func: function):
+            """Perform the specified op on a new (copy) Image object"""
+            def inner(im: Image, *args, **kwargs):
+                return func(type(im)(im.arr.copy()), *args, **kwargs)
             return inner
 
         @classmethod
-        def prep_8UC1(decs, func):
-            """
-            Supply a normalized *greyscale* version of the image.
-            """
+        def prep_8UC1(decs: Decorators,  func: function):
+            """Supply a rounded version of the image with appropriate dtype"""
             @decs.supply_new
-            def inner(cls, *args, **kwargs):
-                cls.cvt8UC1()
-                out = func(cls, *args, **kwargs)
-                return out
+            def inner(im: Image, *args, **kwargs):
+                im.cvt8UC1()
+                return func(im, *args, **kwargs)
+            return inner
+        
+        @classmethod
+        def return_res(decs: Decorators,  func: function):
+            """Replies the altered Image rather than function output"""
+            def inner(im: Image, *args, **kwargs):
+                func(im, *args, **kwargs)
+                return im
             return inner
 
-        @classmethod
-        def reset_dimensions(decs, func):
-            """
-            Get a new height/width value after any relevant ops.
-            """
-            def inner(cls, *args, **kwargs):
-                out = func(cls, *args, **kwargs)
-                im = out[0] if hasattr(out, '__len__') else out  
-                im.h, im.w = im.arr.shape[:2] 
-                return out
-            return inner     
-                
-    def __init__(self, in_arr):
-        """
-        Initialise image as numpy array with h/w and other info.
-        """
-        self.arr = in_arr.copy()  # Copy for hygiene
+    def __init__(self, in_arr: np.array):
+        self.arr = in_arr.copy()  # Bind copy for hygiene
         
-        self.h, self.w = self.arr.shape[:2]
-
-        if len(self.arr.shape) == 3 and self.arr.shape[2] == 1:
-            self.arr = self.arr.reshape(self.h, self.w)  # Force into shape
-    
     @classmethod
-    def _from_bytes(cls, stream) -> Image:
-        """
-        Load an Image class from a bytes stream.
-        """
+    def _from_bytes(cls, stream: bytes) -> Image:
+        """Load an Image class from a bytes stream"""
         return cls(cv2.imdecode(np.frombuffer(stream, np.uint8), flags=1))
     
-    def _to_bytes(self, ftype) -> bytes:
-        """
-        Convert an image array to a stream of bytes.
-        """
+    def _to_bytes(self, ftype: str) -> bytes:
+        """Convert an image array to a stream of bytes"""
         return cv2.imencode(ftype, self.arr)[1].tobytes()
 
+    @Decorators.return_res
     @Decorators.prep_8UC1
-    def adaptive_threshold(self, block_size, c_shift):
-
+    def adaptive_threshold(self, block_size: float, c_shift: float) -> None:
         """Do cv2 adaptive thresholding using parameters specified"""
-
         self.arr = cv2.adaptiveThreshold(self.arr, 
                                          255,
                                          cv2.ADAPTIVE_THRESH_MEAN_C,
                                          cv2.THRESH_BINARY,
                                          block_size,
                                          c_shift)
-        return self
 
-    def affine_transform(self, a, x_off, y_off):
-        """
-        Build and apply affine transformation matrix from component parts.
-        """
-        M = cv2.getRotationMatrix2D((int(self.w / 2), int(self.h / 2)), a, 1)
-        
+    @Decorators.return_res
+    def affine_trans(self, theta: float, x_off: float, y_off: float) -> None:
+        """Build and apply affine transformation matrix from component parts"""
+        M = cv2.getRotationMatrix2D(self.c, theta, 1)
         M[0, 2] += x_off
         M[1, 2] += y_off
-
         self.arr = cv2.warpAffine(self.arr, M, (self.w, self.h))
 
-        return self
-
-    def cast(self, casttype):
-        """
-        Cast the image array to the type specified.
-        """
+    @Decorators.return_res
+    def cast(self, casttype: str) -> None:
+        """Cast the image array to the type specified"""
         self.arr = self.arr.astype(casttype)
-        
-        return self
 
-    @Decorators.reset_dimensions
-    def crop(self, pt0, pt1):
-        """
-        Do straightforward rectangular cropping from pt --> pt.
-        """        
-        x_lo, y_hi = [x if x > 0 else 0 for x in pt0]
+    @Decorators.return_res
+    def crop(self, pt0: tuple, pt1: tuple) -> None:
+        """Do straightforward rectangular cropping from pt --> pt"""        
+        x_lo, y_hi = [x if x > 0 else 0 for x in pt0]  # Replace any sub-0 vals
         x_hi, y_lo = [x if x > 0 else 0 for x in pt1]
 
         self.arr = self.arr[y_hi:y_lo, x_lo:x_hi]
 
-        return self
-
-    def cut_box(self, x, y, w, h, pad=0):
-        """
-        Cut out a box and return as a new image object.
-        """
-        pt0 = (x - pad, y - pad)
-        pt1 = (x + w + pad, y + h + pad)
-
-        self.crop(pt0, pt1)
+    def cut_box(self, x: int, y: int, w: int, h: int, pad: int=0) -> tuple:
+        """Cut out a box and return as a new image object"""
+        self.crop((x - pad, y - pad), (x + w + pad, y + h + pad))
 
         # Return any overlap which was missed by the crop
-        off_h = -(x - pad) if x - pad < 0 else 0
-        off_v = -(y - pad) if y - pad < 0 else 0
+        off_h = pad - x if x - pad < 0 else 0
+        off_v = pad - y if y - pad < 0 else 0
         
         return self, (off_h, off_v)
 
-    def cvt8UC1(self):
-        """
-        Helper function for utility functions which need this format but don't
-        return the image.
-        """
+    @Decorators.return_res
+    def cvt8UC1(self) -> None:
+        """Converts into filter-friendly format (i.e. unsigned 0-255)"""
         self.norm_minmax().cast('uint8')
-        
-        return self
 
-    def cvt2color(self):
-        """
-        Convert a greyscale image to a color image.
-        """
-        assert len(self.arr.shape) == 2, Exception('Too many channels')
-
+    @Decorators.return_res
+    def cvt2color(self) -> None:
+        """Convert a greyscale image to a color image"""
+        if len(self.arr.shape) == 2:
+            raise Exception('Can\'t convert from color -> color')
         self.arr = cv2.merge([self.arr, self.arr, self.arr])
 
-        return self
-
-    def draw_boxes(self, boxes, fill_type=1, color=(0, 0, 255)):
-        """
-        Draw the boxes onto the image using default settings.
-        """
+    @Decorators.return_res
+    def draw_boxes(self, boxes: list, fill_type: int=1, 
+    color: tuple=(0, 0, 255)) -> None:
+        """Draw boxes onto an image"""
         for x, y, w, h in boxes:
             cv2.rectangle(self.arr, (x, y), (x + w, y + h), color, fill_type)
-        return self
 
-    def draw_contours(self, cnts, fill_type=1, color=(0, 0, 255)):
-        """
-        Draw the contours onto the image using default settings.
-        """
+    @Decorators.return_res
+    def draw_contours(self, cnts: list, fill_type: int=1,
+    color: tuple=(0, 0, 255)) -> None:
+        """Draw contours onto an image"""
         cv2.drawContours(self.arr, cnts, -1, color, fill_type)
-        
-        return self
 
-    def draw_lines(self, lines, fill_type=1, color=(0, 0, 255)):
-        """
-        Draw lines onto an image.
-        """
+    @Decorators.return_res
+    def draw_lines(self, lines: list, fill_type: int=1,
+    color: tuple=(0, 0, 255)) -> None:
+        """Draw lines onto an image"""
         for pt1, pt2 in lines:
             cv2.line(self.arr, pt1, pt2, color, fill_type, cv2.LINE_AA)
 
-    def draw_polys(self, polys, fill_type=1, color=(0, 0, 255)):
-        """
-        Draw a (closed) polygon onto an image.
-        """
+    @Decorators.return_res
+    def draw_polys(self, polys: list, fill_type: int=1,
+    color: tuple=(0, 0, 255)) -> None:
+        """Draw a (closed) polygon onto an image"""
         for pts in polys:
             lines = []
             for i, pt0 in enumerate(pts):
@@ -190,157 +133,99 @@ class Image:
                 lines.append((pt0[0], pt1[0]))
             self.draw_lines(lines, color=color) 
 
-        return self
-
-    def flood_fill(self, c, color=255):
-        """
-        Fill contained spaces from the inside out.
-        """
+    @Decorators.return_res  # TODO I don't know what this does
+    def flood_fill(self, c: list, color: tuple=(0, 0, 255)) -> None:
+        """Fill contained spaces from the inside out"""
         mask = np.zeros((self.h + 2, self.w + 2), np.uint8)
         cv2.floodFill(self.arr, mask, [int(x) for x in c], color)
-
-        return self
 
     ####   'get_' methods return something other than the image itself   ####
 
     @Decorators.prep_8UC1
-    def get_contours(self, as_mbrs=False):
-        """
-        Shorthand for the cv2 findContours method.
-        """
-        cnts, _ = cv2.findContours(self.arr, cv2.RETR_TREE,
-                                                    cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Return in descending order of size (area)
-        cnts = sorted(cnts, key=lambda x: cv2.contourArea(x))[::-1]
-
+    def get_contours(self, as_mbrs: bool=False) -> list:
+        """Shorthand for the cv2 findContours method"""
+        cnts, _ = cv2.findContours(self.arr,
+                                   cv2.RETR_TREE,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+        cnts.sort(key=lambda x: cv2.contourArea(x), reverse=True)
         if as_mbrs:
             for i, cnt in enumerate(cnts):
-                cnt = cnt.reshape(len(cnt), 2)
-                pt0 = min([x[0] for x in cnt]), min([x[1] for x in cnt])
-                pt1 = max([x[0] for x in cnt]), max([x[1] for x in cnt])
-
-                cnts[i] = (*pt0, pt1[0] - pt0[0], pt1[1] - pt0[1])
-
+                cnts[i] = cv2.boxPoints(cv2.minAreaRect(cnt))
         return cnts
 
-    @Decorators.supply_new
-    def get_copy(self):
-        """
-        Copy existing class applying hard copy to array attribute.
-        """
-        return self
-
     def get_extremities(self):
-        """
-        Get the outermost points in every direction of nonzero pixels.
-        """
-        hi, lo = self.nonzero[0][0], self.nonzero[0][-1]
-        l, r   = self.T.nonzero[0][0], self.T.nonzero[0][-1]
-
+        """Get the outermost points in every direction of nonzero pixels"""
+        y_pts, x_pts = self._nonzero()[:2]
+        hi, lo = np.min(y_pts), np.max(y_pts)
+        l, r   = np.min(x_pts), np.max(x_pts)
         return hi, lo, l, r
 
     @Decorators.prep_8UC1
-    def get_hough_lines(self, thresh, min_len, max_gap):
-        """
-        Return the result of a hough transform when applied to the image.
-        """
-        lines = cv2.HoughLinesP(self.arr, 1, np.pi / 180, thresh, None,
-                                                            min_len, max_gap)
+    def get_hough_lines(self, thresh: float, min_len: float,
+    max_gap: float) -> list:
+        """Return the result of a hough transform"""
+        lines = cv2.HoughLinesP(
+        self.arr, 1, np.pi / 180, thresh, None, min_len, max_gap)
         if lines is None:
             return []
-        else:
-            return lines.reshape(len(lines), 2, 2)  # Removes additional dim
+        return lines.reshape(len(lines), 2, 2)  # Removes additional axis
 
+    @Decorators.return_res
     @Decorators.supply_new
-    def get_template(self, color=0):
-        """
-        Return Image object with zero (black) array of same size.
-        """
-        if color == 0:
-            self.arr = np.zeros_like(self.arr).astype('uint8')
-        else:
-            self.arr = np.full([self.h, self.w], color).astype('uint8')
-        
-        return self
+    def get_template(self, color: Union[int, tuple]=0) -> None:
+        """Return new Image with array of same size and block color"""
+        self.arr = np.full([self.h, self.w], color).astype('uint8')
 
-    def morph(self, morph_type, kernel):
-        """
-        Shorthand for cv2 morphologyEx method - requires kernel/type spec.
-        """
-        op = eval('cv2.MORPH_' + morph_type.upper())
-        self.arr = cv2.morphologyEx(self.arr, op, kernel, cv2.BORDER_DEFAULT)
+    @Decorators.return_res
+    def morph(self, morph_type: str, kernel: np.array) -> None:
+        """Shorthand for cv2 morphologyEx method - requires kernel/type spec"""
+        self.arr = cv2.morphologyEx(self.arr,
+                                    eval('cv2.MORPH_' + morph_type.upper()),
+                                    kernel,
+                                    cv2.BORDER_DEFAULT)
 
-        return self
-
-    def norm_minmax(self, lo=None, hi=None):
-        """
-        Normalize such that the specified values are set to 0/255.
-        """
-        hi = hi if hi else self.hi
-        lo = lo if lo else self.lo
-        
+    @Decorators.return_res
+    def norm_minmax(self, lo: int=None, hi: int=None) -> None:
+        """Normalize such that the specified values are set to 0/255"""
+        if hi is None:
+            hi = self.hi  # Set min/max to limits of image if None passed
+        if lo is None:
+            lo = self.lo
         self.arr = self.arr - lo
+        self.arr = self.arr * 255 / (hi - lo)
 
-        scale_hi = 255 / (hi - lo)
-        self.arr = self.arr * scale_hi
+    @Decorators.return_res
+    def pad(self, hi: int, lo: int, l: int, r: int,
+    color: Union[int, tuple]=0) -> None:
+        """Add padding to the image as specified"""
+        def build(*dims):
+            return np.full(dims, color, dtype=self.arr.dtype)
+        self.arr = np.vstack([build(hi, self.w), self.arr, build(lo, self.w)])
+        self.arr = np.hstack([build(self.h, l), self.arr, build(self.h, r)])
 
-        return self
-
-    @Decorators.reset_dimensions
-    def pad(self, hi, lo, l, r, color=0):
-        """
-        Add black padding to the image as specified.
-        """
-        pad_hi = np.full([hi, self.w], color).astype(self.arr.dtype)
-        pad_lo = np.full([lo, self.w], color).astype(self.arr.dtype)
-
-        self.arr = np.vstack([pad_hi, self.arr, pad_lo])
-
-        pad_l = np.full([self.h + hi + lo, l], color).astype(self.arr.dtype)
-        pad_r = np.full([self.h + hi + lo, r], color).astype(self.arr.dtype)
-        
-        self.arr = np.hstack([pad_l, self.arr, pad_r])
-
-        return self
-
-    def print(self, fpath):
-        """
-        Save to the location specified.
-        """
+    def save(self, fpath: str) -> None:
+        """Save to the location specified"""
         cv2.imwrite(fpath, self.arr)
 
-    def put_text(self, text):
-        """
-        Shorthand for cv2 puttext method.
-        """
-        cv2.putText(self.arr, str(text), (2, 10), cv2.FONT_HERSHEY_SIMPLEX,
-                                                    0.25, (0, 0, 255), 1)
+    @Decorators.return_res
+    def put_text(self, text: str, size: int, 
+    color: Union[int, tuple]=255) -> None:
+        """Shorthand for cv2 puttext method"""
+        cv2.putText(
+        self.arr, str(text), (2, 10), cv2.FONT_HERSHEY_SIMPLEX, size, color, 1)
 
-        return self
+    @Decorators.return_res
+    def resize(self, new_w: int=None, new_h: int=None) -> None:
+        """Resize the image to the dimensions specified"""
+        self.arr = cv2.resize(self.arr, (new_w if new_w else self.w, 
+                                         new_h if new_h else self.h))
 
-    @Decorators.reset_dimensions
-    def resize(self, w=None, h=None):
-        """
-        Resize the image to the dimensions specified.
-        """
-        w = w if w else self.w
-        h = h if h else self.h
-
-        self.arr = cv2.resize(self.arr, (w, h))
-
-        return self
-
-    @Decorators.reset_dimensions
-    def rotate(self, theta, bound=True, bd=0):
-        """
-        Spin the image through the angle specified.
-        """
+    def rotate(self, theta: float, bound: bool=True, bd: int=0) -> None:
+        """Spin the image through the angle specified"""
         M = cv2.getRotationMatrix2D(self.c, theta, 1)
-
         if bound:
-            cos = np.abs(M[0, 0])
-            sin = np.abs(M[0, 1])
+            # TODO I'm not sure what this does either
+            cos, sin = np.abs(M[0])
             
             w = int((self.h * sin) + (self.w * cos))
             h = int((self.h * cos) + (self.w * sin))
@@ -359,9 +244,7 @@ class Image:
         return self, (off_x, off_y)
 
     def sharpen_edges(self, hi_k, lo_k, thresh=True):
-        """
-        Erode using specified kernel to get sharper *white* edges.
-        """
+        """Erode using specified kernel to get sharper *white* edges"""
         v_kernel = np.ones([hi_k, lo_k])
         self.arr = cv2.erode(self.arr, v_kernel)
         self.arr = cv2.dilate(self.arr, v_kernel)
@@ -416,8 +299,24 @@ class Image:
         _, self.arr = cv2.threshold(self.arr, thresh_val, 255,
                                                             cv2.THRESH_BINARY)
         return self
+    
+    ####   Expensive properties evaluated as private functions   ####
+
+    def _nonzero(self):
+        return np.nonzero(self.arr)
+
+    def _T(self):
+        return Image(self.arr.T)
 
     ####   Useful properties are evaluated on-demand   #####
+
+    @property
+    def h(self):
+        return self.size[0]
+    
+    @property
+    def w(self):
+        return self.size[1]
 
     @property
     def area(self):
@@ -434,11 +333,3 @@ class Image:
     @property
     def c(self):
         return self.w / 2, self.h / 2
-
-    @property
-    def nonzero(self):
-        return np.nonzero(self.arr)
-
-    @property
-    def T(self):
-        return Image(self.arr.T)
