@@ -1,13 +1,11 @@
+from __future__ import annotations
+
 import numpy as np
 import cv2
-import math
 import warnings
-import os
 from copy import copy
-from .utils import Utils
 
-warnings.filterwarnings('ignore')
-DEBUG_SIZE_PX = [500, 500]
+DEBUG_SIZE_PX = 900
 
 class Image:
 
@@ -54,21 +52,29 @@ class Image:
                 return out
             return inner     
                 
-    def __init__(self, in_obj):
+    def __init__(self, in_arr):
         """
         Initialise image as numpy array with h/w and other info.
         """
-        if isinstance(in_obj, str):  # If str assume path to saved .npy array
-            self.arr = np.load(in_obj).astype('float64')
-            self.fname = os.path.split(in_obj)[1].split('.')[0]
-        else:
-            # Otherwise assume live array - copy for hygiene
-            self.arr = in_obj.copy()
+        self.arr = in_arr.copy()  # Copy for hygiene
         
         self.h, self.w = self.arr.shape[:2]
 
         if len(self.arr.shape) == 3 and self.arr.shape[2] == 1:
             self.arr = self.arr.reshape(self.h, self.w)  # Force into shape
+    
+    @classmethod
+    def _from_bytes(cls, stream) -> Image:
+        """
+        Load an Image class from a bytes stream.
+        """
+        return cls(cv2.imdecode(np.frombuffer(stream, np.uint8), flags=1))
+    
+    def _to_bytes(self, ftype) -> bytes:
+        """
+        Convert an image array to a stream of bytes.
+        """
+        return cv2.imencode(ftype, self.arr)[1].tobytes()
 
     @Decorators.prep_8UC1
     def adaptive_threshold(self, block_size, c_shift):
@@ -386,10 +392,19 @@ class Image:
         Normalize and show the image for debugging purposes.
         """
         # Operations will have no effect if no objects supplied
-        self.cvt2color().draw_contours(cnts).draw_boxes(boxes).draw_lines(lines)
+        if len(self.arr.shape) == 2:
+            self.cvt2color()
+        self.draw_contours(cnts).draw_boxes(boxes).draw_lines(lines)
         self.put_text(text).draw_polys(polys)
+
+        if self.h > self.w:
+            ratio = DEBUG_SIZE_PX / self.h
+            DEBUG_DIMS = int(self.w * ratio), DEBUG_SIZE_PX
+        else:
+            ratio = DEBUG_SIZE_PX / self.w
+            DEBUG_DIMS = DEBUG_SIZE_PX, int(self.h * ratio)
         
-        #self.resize(*DEBUG_SIZE_PX)
+        self.resize(*DEBUG_DIMS)
         cv2.imshow('progress', self.arr)
         if cv2.waitKey(0) == ord('q'):
             cv2.destroyAllWindows()
