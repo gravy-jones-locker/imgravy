@@ -24,7 +24,6 @@ class Image:
         @classmethod
         def prep_8UC1(decs,  func: function):
             """Supply a rounded version of the image with appropriate dtype"""
-            @decs.supply_new
             def inner(im: Image, *args, **kwargs):
                 im.cvt8UC1()
                 return func(im, *args, **kwargs)
@@ -38,14 +37,21 @@ class Image:
                 return im
             return inner
 
-    def __init__(self, in_obj: Union[str, bytes, np.ndarray]) -> None:
+    def __init__(self, in_obj: Union[str, bytes, np.ndarray],
+    grayscale: bool=False) -> None:
         """Execute correct method to bind array from the input object"""
+        self.arr = self._parse_in_obj(in_obj)
+        if grayscale:
+            self.cvt2gray()
+    
+    def _parse_in_obj(self, in_obj: Union[str, bytes, np.ndarray]) -> np.ndarray:
+        """Get array from generic input object"""
         if isinstance(in_obj, np.ndarray):
-            self.arr = in_obj
+            return in_obj
         if isinstance(in_obj, str):
-            self.arr = self._parse_file(in_obj)
+            return self._parse_file(in_obj)
         if isinstance(in_obj, bytes):
-            self.arr = self._parse_bytes(in_obj)
+            return self._parse_bytes(in_obj)
         
     def _parse_bytes(self, stream: bytes) -> Image:
         """Load an Image class from a bytes stream"""
@@ -65,7 +71,7 @@ class Image:
         """Do cv2 adaptive thresholding using parameters specified"""
         self.arr = cv2.adaptiveThreshold(self.arr, 
                                          255,
-                                         cv2.ADAPTIVE_THRESH_MEAN_C,
+                                         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                                          cv2.THRESH_BINARY,
                                          block_size,
                                          c_shift)
@@ -175,6 +181,15 @@ class Image:
                     1)
     
     @Decorators.return_res
+    def find_diff(self, smooth_k: int, blur_k: int) -> None:
+        """Subtract image from its average to expose edges"""
+        self.arr = cv2.GaussianBlur(self.arr, (smooth_k, smooth_k), 0)
+        blur = cv2.GaussianBlur(self.arr, (blur_k, blur_k), 0)
+        self.arr = blur - self.arr
+        self.arr[self.arr > 255] = 255
+        self.arr[self.arr < 0] = 0
+    
+    @Decorators.return_res
     def fit_window(self) -> None:
         """Resize to the max dim given in DEBUG_SIZE_PX"""
         if self.h > self.w:
@@ -229,6 +244,11 @@ class Image:
         self.arr = np.full([self.h, self.w], color).astype('uint8')
 
     @Decorators.return_res
+    def invert(self):
+        """Invert the values such that 0/255 swap"""
+        self.arr = 255 - self.arr
+
+    @Decorators.return_res
     def morph(self, morph_type: str, kernel: np.array) -> None:
         """Shorthand for cv2 morphologyEx method - requires kernel/type spec"""
         self.arr = cv2.morphologyEx(self.arr,
@@ -237,13 +257,10 @@ class Image:
                                     cv2.BORDER_DEFAULT)
 
     @Decorators.return_res
-    def norm_minmax(self, lo: int=None, hi: int=None, bound: bool=False, 
-    keep_dtype: bool=False) -> None:
+    def norm_minmax(self, lo: int=None, hi: int=None, quantiles: tuple=None,
+    bound: bool=False, keep_dtype: bool=False) -> None:
         """Normalize such that the specified values are set to 0/255"""
-        if hi is None:  # Set min/max to limits of image if None passed
-            hi = self.hi  
-        if lo is None:
-            lo = self.lo
+        lo, hi = self._parse_norm_limits(lo, hi, quantiles)
         dtype = self.arr.dtype
         self.arr = (self.cast('float64').arr - lo) * (255 / (hi - lo))
         if bound:
@@ -274,48 +291,40 @@ class Image:
     def rotate(self, theta: float, bound: bool=True, bd: int=0) -> None:
         """Spin the image through the angle specified"""
         M = cv2.getRotationMatrix2D(self.c, theta, 1)
-        if bound:
+        w = self.w
+        h = self.h
+        off_x, off_y = 0, 0
+        if bound:  # Maintains absolute size in new angle of rotation
             cos, sin = np.abs(M[0, :2])
-            
             w = int((self.h * sin) + (self.w * cos))
             h = int((self.h * cos) + (self.w * sin))
-
             off_x = int((w / 2) - self.c[0])
             off_y = int((h / 2) - self.c[1])
-
             M[0, 2] += off_x
             M[1, 2] += off_y
-        else:
-            w, h = self.w, self.h
-            off_x, off_y = 0, 0
-
         self.arr = cv2.warpAffine(self.arr, M, (w, h), borderValue=bd)
-
         return self, (off_x, off_y)
 
-    def sharpen_edges(self, hi_k, lo_k, thresh=True):
+    @Decorators.return_res
+    def sharpen_edges(self, k_dims: tuple, thresh: bool=True):
         """Erode using specified kernel to get sharper *white* edges"""
-        v_kernel = np.ones([hi_k, lo_k])
-        self.arr = cv2.erode(self.arr, v_kernel)
-        self.arr = cv2.dilate(self.arr, v_kernel)
-
-        h_kernel = np.ones([lo_k, hi_k])
-        self.arr = cv2.erode(self.arr, h_kernel)
-        self.arr = cv2.dilate(self.arr, h_kernel)
-
+        for dims in k_dims, k_dims[::-1]:
+            kernel = np.ones(dims)
+            # Erode then dilate to extract continuous horiz/vert lines
+            for method in cv2.erode, cv2.dilate:
+                self.arr = method(self.arr, kernel)
         if thresh:
             self.threshold(1)
-        
-        return self
 
     @Decorators.return_res
-    def slice_rng(self, lo=None, hi=None) -> None:
+    def slice_rng(self, lo: float=None, hi: float=None) -> None:
         """Slice the intensities in the image to those inside the range"""
         if lo is not None:
             self.arr[self.arr < lo] = self.lo
         if hi is not None:
             self.arr[self.arr > hi] = self.hi
 
+    @Decorators.supply_new
     @Decorators.prep_8UC1
     def show(self, resize: bool=True, **annotations) -> None:
         """Annotate/normalize the image"""
@@ -323,8 +332,7 @@ class Image:
         if resize:
             self.fit_window()
         cv2.imshow('progress', self.arr)
-        while cv2.waitKey(0) != ord('q'):
-            pass
+        cv2.waitKey(0)
         cv2.destroyAllWindows()
 
     @Decorators.return_res
@@ -370,3 +378,8 @@ class Image:
     @property
     def c(self):
         return self.w / 2, self.h / 2
+
+    def _parse_norm_limits(self, lo: int, hi: int, quantiles: tuple) -> tuple:
+        if quantiles is not None:
+            return (np.quantile(self.arr, q) for q in quantiles)
+        return self.lo if lo is None else lo, self.hi if hi is None else hi
