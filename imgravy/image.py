@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Union
+from scipy import stats
 
 import numpy as np
 import cv2
@@ -31,7 +32,7 @@ class Image:
         
         @classmethod
         def return_res(decs,  func: function):
-            """Replies the altered Image rather than function output"""
+            """Returns the altered Image rather than function output"""
             def inner(im: Image, *args, **kwargs):
                 func(im, *args, **kwargs)
                 return im
@@ -91,6 +92,11 @@ class Image:
             self.cvt2color()  # Guarantees annotations will show
         for key, value in annotations.items():
             eval(f'self.draw_{key}(value)')
+    
+    @Decorators.return_res
+    def blur_gaussian(self, kernel: tuple) -> None:
+        """Do Gaussian blurring"""
+        self.arr = cv2.GaussianBlur(self.arr, kernel, 0)
 
     @Decorators.return_res
     def cast(self, casttype: str) -> None:
@@ -99,7 +105,7 @@ class Image:
     
     def copy(self) -> Image:
         """Provide a copy of the Image object for unconnected edits"""
-        return Image(self.arr.copy())
+        return type(self)(self.arr.copy())
 
     @Decorators.return_res
     def crop(self, pt0: tuple, pt1: tuple) -> None:
@@ -137,17 +143,22 @@ class Image:
         if len(self.arr.shape) == 2:
             return  # True if already grayscale
         self.arr = cv2.cvtColor(self.arr, cv2.COLOR_BGR2GRAY)
+    
+    @Decorators.return_res
+    def cvt2hsv(self) -> None:
+        """Convert from BGR colorspace to HSV colorspace"""
+        self.arr = cv2.cvtColor(self.arr, cv2.COLOR_BGR2HSV)
 
     @Decorators.return_res
-    def draw_boxes(self, boxes: list, fill_type: int=1, 
-    color: tuple=(0, 0, 255)) -> None:
+    def draw_boxes(self, boxes: list, fill_type: int=3, 
+    color: tuple=(0, 255, 0)) -> None:
         """Draw boxes onto an image"""
         for x, y, w, h in boxes:
             cv2.rectangle(self.arr, (x, y), (x + w, y + h), color, fill_type)
 
     @Decorators.return_res
-    def draw_contours(self, cnts: list, fill_type: int=1,
-    color: tuple=(0, 0, 255)) -> None:
+    def draw_contours(self, cnts: list, fill_type: int=3,
+    color: tuple=(0, 255, 0)) -> None:
         """Draw contours onto an image"""
         cv2.drawContours(self.arr, cnts, -1, color, fill_type)
 
@@ -181,6 +192,11 @@ class Image:
                     1)
     
     @Decorators.return_res
+    def filter_bilateral(self, d: int, sig_color: int, sig_space: int) -> None:
+        """Do bilateral filtering with the arguments passed"""
+        self.arr = cv2.bilateralFilter(self.arr, d, sig_color, sig_space)
+    
+    @Decorators.return_res
     def find_diff(self, smooth_k: int, blur_k: int) -> None:
         """Subtract image from its average to expose edges"""
         self.arr = cv2.GaussianBlur(self.arr, (smooth_k, smooth_k), 0)
@@ -208,16 +224,23 @@ class Image:
 
     ####   'get_' methods return something other than the image itself   ####
 
+    def get_channel_px(self, i: int, flatten: bool=False) -> np.ndarray:
+        """Return an array of pixels in the channel at i"""
+        out = self.arr[..., i]
+        if flatten:
+            out = out.flatten()
+        return out
+
     @Decorators.prep_8UC1
     def get_contours(self, as_mbrs: bool=False) -> list:
         """Shorthand for the cv2 findContours method"""
-        cnts, _ = cv2.findContours(self.arr,
-                                   cv2.RETR_TREE,
-                                   cv2.CHAIN_APPROX_SIMPLE)
+        cnts = list(cv2.findContours(self.arr,
+                                     cv2.RETR_EXTERNAL,
+                                     cv2.CHAIN_APPROX_SIMPLE)[0])
         cnts.sort(key=lambda x: cv2.contourArea(x), reverse=True)
         if as_mbrs:
             for i, cnt in enumerate(cnts):
-                cnts[i] = cv2.boxPoints(cv2.minAreaRect(cnt))
+                cnts[i] = cv2.boundingRect(cnt)
         return cnts
 
     def get_extremities(self):
@@ -236,9 +259,15 @@ class Image:
         if lines is None:
             return []
         return lines.reshape(len(lines), 2, 2)  # Removes additional axis
+    
+    def get_sample(self, dec: float) -> np.ndarray:
+        """Get a sample of the specified decimal"""
+        sample_size = int(self.arr.size * dec / 3)
+        return self.arr[np.random.randint(self.h, size=sample_size),
+                        np.random.randint(self.w, size=sample_size)]
 
-    @Decorators.return_res
     @Decorators.supply_new
+    @Decorators.return_res
     def get_template(self, color: Union[int, tuple]=0) -> None:
         """Return new Image with array of same size and block color"""
         self.arr = np.full([self.h, self.w], color).astype('uint8')
@@ -281,6 +310,16 @@ class Image:
     def save(self, fpath: str) -> None:
         """Save to the location specified"""
         cv2.imwrite(fpath, self.arr)
+    
+    @Decorators.return_res
+    def select_channels(self, channels: list) -> None:
+        """Selects the specified channels only"""
+        self.arr = self.arr[..., channels]
+    
+    @Decorators.return_res
+    def reduce_bitrate(self) -> None:
+        """Convert to four bit image"""
+        self.arr = ((self.arr.astype(int) >> 4) << 4) + ((1 << 4) >> 1)
 
     @Decorators.return_res
     def resize(self, new_w: int=None, new_h: int=None) -> None:
@@ -352,6 +391,17 @@ class Image:
 
     def _T(self):
         return Image(self.arr.T)
+    
+    def _quantile(self, q: float) -> float:
+        return np.quantile(self.arr, q)
+    
+    def _mode(self) -> np.ndarray:
+        out = []
+        for i in range(self.arr.shape[-1]):
+            channel_px = self.get_channel_px(i, flatten=True)
+            channel_mode = stats.mode(channel_px, axis=None)[0][0]
+            out.append(channel_mode)
+        return np.array(out)
 
     ####   Useful properties are evaluated on-demand   #####
 
